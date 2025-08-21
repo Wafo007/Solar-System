@@ -1,6 +1,6 @@
 import { Canvas } from '@react-three/fiber';
 import { OrbitControls, Stars } from '@react-three/drei';
-import { Suspense, useRef } from 'react';
+import { Suspense, useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import OrbitingPlanet from './OrbitingPlanet';
 import { useTexture } from '@react-three/drei';
@@ -20,46 +20,234 @@ import PlanetFocusView from './PlanetFocusView';
 
 type Props = {
     texture: string;
+    selectedTool: string | null;
+    onExplode?: () => void;
+    sunExploded: boolean;
+    onSelectTool: string;
 };
 
-function RealisticSun({ texture }: Props) {
+//Boite a outil component
+interface ToolboxOverlayProps {
+    onSelectTool: (tool: string) => void;
+    onResetSystem: () => void; // <-- nouveau prop
+}
+
+function ToolboxOverlay({ onSelectTool, onResetSystem }: ToolboxOverlayProps) {
+    const [open, setOpen] = useState(false);
+
+    return (
+        <div style={{
+            position: 'absolute',
+            top: 120,
+            right: 20,
+            zIndex: 10,
+            background: '#222',
+            borderRadius: 8,
+            padding: 10,
+            color: 'white',
+            fontFamily: 'sans-serif',
+            boxShadow: '0 4px 10px rgba(0,0,0,0.4)'
+        }}>
+            <button onClick={() => setOpen(!open)} style={{
+                background: '#444',
+                color: 'white',
+                border: 'none',
+                borderRadius: 4,
+                padding: '6px 10px',
+                cursor: 'pointer'
+            }}>
+                🧰 {open ? "Fermer" : "Ouvrir"} Outils
+            </button>
+
+            {open && (
+                <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column' }}>
+                    <button
+                        onClick={() => onSelectTool('laser')}
+                        style={{
+                            background: '#0078ff',
+                            color: 'white',
+                            border: 'none',
+                            borderRadius: 4,
+                            padding: '6px 10px',
+                            marginTop: 4,
+                            cursor: 'pointer'
+                        }}
+                    >
+                        🔫 Activer le Laser
+                    </button>
+
+                    <button
+                        onClick={onResetSystem} // <-- nouveau bouton
+                        style={{
+                            background: '#ff6600',
+                            color: 'white',
+                            border: 'none',
+                            borderRadius: 4,
+                            padding: '6px 10px',
+                            marginTop: 8,
+                            cursor: 'pointer'
+                        }}
+                    >
+                        ♻️ Réinitialiser le système
+                    </button>
+                </div>
+            )}
+        </div>
+    );
+}
+
+//Composant du soleil
+const NUM_PARTICLES = 500;
+
+function RealisticSun({ texture, selectedTool, onExplode, sunExploded }: Props) {
     const sunRef = useRef<THREE.Mesh>(null!);
     const flareRef = useRef<THREE.Sprite>(null!);
+    const [scale, setScale] = useState(1);
+    const [color, setColor] = useState(new THREE.Color('orange'));
 
-    // Texture principale du Soleil
     const map = useTexture(`/textures/${texture}`);
-
-    // Texture des flammes (image flare transparente à placer dans /public/textures/flare.png)
     const flareTexture = useLoader(TextureLoader, '/textures/solarflare.jpg');
 
-    // Rotation + animation de la flamme
-    useFrame(({ clock }) => {
-        sunRef.current.rotation.y += 0.001;
+    const positions = useRef<Float32Array>(new Float32Array(NUM_PARTICLES * 3));
+    const velocities = useRef<THREE.Vector3[]>([]);
+    const ages = useRef<number[]>([]);
+
+    const [geometry, setGeometry] = useState<THREE.BufferGeometry | null>(null);
+    const [uniforms, setUniforms] = useState<any>(null);
+
+    // Trigger explosion
+    const triggerExplosion = () => {
+        const vel: THREE.Vector3[] = [];
+        const ageArr: number[] = [];
+        for (let i = 0; i < NUM_PARTICLES; i++) {
+            const dir = new THREE.Vector3(
+                (Math.random() - 0.5),
+                (Math.random() - 0.5),
+                (Math.random() - 0.5)
+            ).normalize();
+            const speed = 2 + Math.random() * 200;
+            vel.push(dir.multiplyScalar(speed));
+            ageArr.push(0);
+
+            positions.current[i * 3] = 0;
+            positions.current[i * 3 + 1] = 0;
+            positions.current[i * 3 + 2] = 0;
+        }
+        velocities.current = vel;
+        ages.current = ageArr;
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(positions.current, 3));
+        setGeometry(geo);
+
+        // Uniforms pour le shader
+        setUniforms({
+            time: { value: 0 },
+            lifespan: { value: 5 } // durée de vie particules
+        });
+    };
+
+    useEffect(() => {
+        if (sunExploded) triggerExplosion()
+    }, [sunExploded]);
+
+    useFrame((state, delta) => {
+        // Soleil + flare
+        if (!sunExploded && sunRef.current) {
+            sunRef.current.rotation.y += 0.001;
+            if (selectedTool === 'laser') {
+                const newScale = scale + 0.02;
+                setScale(newScale);
+                sunRef.current.scale.set(newScale, newScale, newScale);
+                const ratio = Math.min((newScale - 1) / 4, 1);
+                setColor(new THREE.Color().lerpColors(new THREE.Color('orange'), new THREE.Color('blue'), ratio));
+                if (newScale >= 5 && onExplode) onExplode();
+            }
+        }
+
         if (flareRef.current) {
-            const time = clock.getElapsedTime();
-            const scale = 6 + Math.sin(time * 3) * 0.8; // pulsation de la flamme
-            flareRef.current.scale.set(scale, scale, 1);
+            const time = state.clock.getElapsedTime();
+            const flareScale = 6 + Math.sin(time * 3) * 0.8;
+            flareRef.current.scale.set(flareScale, flareScale, 1);
+        }
+
+        // Explosion anim
+        if (sunExploded && geometry && uniforms) {
+            let allGone = true;
+            for (let i = 0; i < NUM_PARTICLES; i++) {
+                ages.current[i] += delta;
+                const ageRatio = ages.current[i] / 5; // 5 sec lifespan
+
+                if (ageRatio < 1) {
+                    allGone = false;
+                    positions.current[i * 3] += velocities.current[i].x * delta;
+                    positions.current[i * 3 + 1] += velocities.current[i].y * delta;
+                    positions.current[i * 3 + 2] += velocities.current[i].z * delta;
+                    velocities.current[i].multiplyScalar(0.98); // friction
+                }
+            }
+
+            geometry.attributes.position.needsUpdate = true;
+            uniforms.time.value += delta;
         }
     });
 
+    // Shader pour particules rondes et brillantes
+    const particleShader = uniforms
+        ? new THREE.ShaderMaterial({
+            uniforms,
+            transparent: true,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+            vertexShader: `
+          attribute float size;
+          varying float vAge;
+          void main() {
+            vAge = 0.0;
+            vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+            gl_PointSize = 10.0 * (300.0 / -mvPosition.z);
+            gl_Position = projectionMatrix * mvPosition;
+          }
+        `,
+            fragmentShader: `
+          varying float vAge;
+          uniform float time;
+          uniform float lifespan;
+          void main() {
+            float alpha = 1.0 - (time / lifespan);
+            vec3 color = mix(vec3(1.0,0.5,0.0), vec3(1.0,1.0,1.0), time / lifespan);
+            vec2 coord = gl_PointCoord - vec2(0.5);
+            float dist = length(coord);
+            if (dist > 0.5) discard;
+            gl_FragColor = vec4(color, alpha);
+          }
+        `
+        })
+        : null;
+
     return (
         <group>
-            {/* Soleil */}
-            <mesh ref={sunRef} receiveShadow={false} castShadow={false}>
-                <sphereGeometry args={[22, 64, 64]} />
-                <meshStandardMaterial map={map} />
-            </mesh>
+            {!sunExploded && (
+                <mesh ref={sunRef}>
+                    <sphereGeometry args={[22, 64, 64]} />
+                    <meshStandardMaterial map={map} emissive={color} emissiveIntensity={2} />
+                </mesh>
+            )}
+            {!sunExploded && (
+                <sprite ref={flareRef}>
+                    <spriteMaterial
+                        map={flareTexture}
+                        color="#ff5500"
+                        transparent
+                        blending={THREE.AdditiveBlending}
+                        depthWrite={false}
+                    />
+                </sprite>
+            )}
 
-            {/* Jet de flamme (solar flare) */}
-            <sprite ref={flareRef}>
-                <spriteMaterial
-                    map={flareTexture}
-                    color="#ff5500"
-                    transparent
-                    blending={AdditiveBlending}
-                    depthWrite={false}
-                />
-            </sprite>
+            {sunExploded && geometry && particleShader && (
+                <points geometry={geometry} material={particleShader} />
+            )}
         </group>
     );
 }
@@ -76,6 +264,8 @@ const planetDescriptions: Record<string, string> = {
 };
 
 export default function SolarSystem() {
+
+    const [systemKey, setSystemKey] = useState(0); //Clé pour réinitialiser 
     const cityLightsMap = useLoader(TextureLoader, '/textures/earth_nightmap.jpg');
     const [followedPlanet, setFollowedPlanet] = useState<THREE.Object3D | null>(null);
     const [selectedPlanetName, setSelectedPlanetName] = useState<string | null>(null);
@@ -84,6 +274,8 @@ export default function SolarSystem() {
     const [orbitSpeedFactor, setOrbitSpeedFactor] = useState(1);//Vitesse orbit des planettes
     const [selectedPlanet, setSelectedPlanet] = useState<string | null>(null); //Pour le focus isolser de chaue planette en ajoutant un state global
     const [alignPlanets, setAlignPlanets] = useState(false); //un state pour dire que par defaut les planette ne sont pas alligner elle bouge normalement
+    const [selectedTool, setSelectedTool] = useState<string | null>(null); //Boite a outil
+    const [sunExploded, setSunExploded] = useState(false);
 
     //On teste si la planette est selectionne pour faire un focus simple
     if (selectedPlanet) {
@@ -97,29 +289,47 @@ export default function SolarSystem() {
 
     return (
 
-        <div style={{ position: 'relative', width: '100%', height: '100%' }}>{followedPlanet && (
-            <button
-                onClick={() => {
-                    if (selectedPlanetName) {
-                        alert(planetDescriptions[selectedPlanetName]);
-                    }
-                }}
-                style={{
-                    position: 'absolute',
-                    top: 20,
-                    left: 120,
-                    zIndex: 1,
-                    padding: '10px 20px',
-                    fontSize: '16px',
-                    backgroundColor: '#3377ff',
-                    color: 'white',
-                    border: 'none',
-                    borderRadius: '8px',
-                    cursor: 'pointer',
-                }}>
-                En savoir plus
-            </button>)
-        } {/* Bouton Stop */} {followedPlanet && (<button onClick={() => setFollowedPlanet(null)} style={{ position: 'absolute', top: 20, left: 20, zIndex: 1, padding: '10px 20px', fontSize: '16px', backgroundColor: '#ff4444', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', }} > Stop </button>)}
+        <div style={{ position: 'relative', width: '100%', height: '100%' }}>
+            <>
+                {/* Boîte à outils flottante */}
+                <ToolboxOverlay
+                    onSelectTool={(tool) => setSelectedTool(tool)}
+                    onResetSystem={() => {
+                        // réinitialisation complète
+                        setSunExploded(false);
+                        setSelectedPlanet(null);
+                        setFollowedPlanet(null);
+                        setSelectedPlanetName(null);
+                        setAlignPlanets(false);
+                        setOrbitSpeedFactor(1);
+                        setSystemKey(prev => prev + 1); // force reconstruction du Canvas
+                        setSelectedTool(null);
+                    }}
+                />
+            </>
+            {followedPlanet && (
+                <button
+                    onClick={() => {
+                        if (selectedPlanetName) {
+                            alert(planetDescriptions[selectedPlanetName]);
+                        }
+                    }}
+                    style={{
+                        position: 'absolute',
+                        top: 20,
+                        left: 120,
+                        zIndex: 1,
+                        padding: '10px 20px',
+                        fontSize: '16px',
+                        backgroundColor: '#3377ff',
+                        color: 'white',
+                        border: 'none',
+                        borderRadius: '8px',
+                        cursor: 'pointer',
+                    }}>
+                    En savoir plus
+                </button>)
+            } {/* Bouton Stop */} {followedPlanet && (<button onClick={() => setFollowedPlanet(null)} style={{ position: 'absolute', top: 20, left: 20, zIndex: 1, padding: '10px 20px', fontSize: '16px', backgroundColor: '#ff4444', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', }} > Stop </button>)}
 
             {/* boutons pour coontroller la vitesse de navigation */}
             <div style={{ position: 'absolute', top: 10, right: '10px', zIndex: 10, background: 'white', padding: '10px', borderRadius: '10px' }}>
@@ -157,6 +367,7 @@ export default function SolarSystem() {
             </div>
 
             <Canvas
+                key={systemKey} //Clé pour reccreer Canvas et reintailiser tout
                 shadows
                 camera={{ position: [0, 20, 50], fov: 60 }}
                 gl={{ physicallyCorrectLights: true }}
@@ -183,6 +394,9 @@ export default function SolarSystem() {
                     {/* Soleil */}
                     <RealisticSun
                         texture="sun.jpg"
+                        selectedTool={selectedTool}
+                        sunExploded={sunExploded}
+                        onExplode={() => setSunExploded(true)}
                     />
 
                     {/* planetee en orbite */}
@@ -213,7 +427,10 @@ export default function SolarSystem() {
                                     setFollowedPlanet(ref);
                                     setSelectedPlanetName("mercury");
                                 }}
+                                sunPosition={new THREE.Vector3(0, 0, 0)} // ou position réelle du Soleil
+                                sunExploded={sunExploded}
                                 speedFactor={orbitSpeedFactor}
+
                             />
                         </>
                     )}
@@ -537,6 +754,6 @@ export default function SolarSystem() {
                 </Suspense>
                 <BlackHole />
             </Canvas>
-        </div >);
+        </div>);
 
 }
