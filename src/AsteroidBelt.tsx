@@ -12,7 +12,7 @@ export default function AsteroidBelt() {
     const data = [];
     for (let i = 0; i < ASTEROID_COUNT; i++) {
       const angle = Math.random() * Math.PI * 2;
-      const radius = 55 + Math.random() * 10; // Ceinture entre Mars et Jupiter
+      const radius = 85 + Math.random() * 10; // Ceinture entre Mars et Jupiter
       const y = (Math.random() - 0.5) * 2; // légère épaisseur verticale
       const speed = 0.001 + Math.random() * 0.002;
 

@@ -16,7 +16,7 @@ import AsteroidBelt from './AsteroidBelt';
 import BlackHole from './BlackHole';
 import HamburgerMenu from './HamburgerMenu';
 import PlanetFocusView from './PlanetFocusView';
-
+import { useThree } from '@react-three/fiber';
 
 type Props = {
     texture: string;
@@ -26,14 +26,116 @@ type Props = {
     onSelectTool: string;
 };
 
-//Boite a outil component
-interface ToolboxOverlayProps {
-    onSelectTool: (tool: string) => void;
-    onResetSystem: () => void; // <-- nouveau prop
+
+// Un faisceau laser qui part de la caméra et va jusqu'au point "to".
+// Il vit "duration" secondes et s'éteint en douceur.
+// On dessine deux cylindres : un coeur fin très lumineux + un halo plus large et plus transparent.
+function LaserBeam({
+    to,
+    startedAt,
+    duration = 5,            // durée du tir en secondes
+    color = new THREE.Color('#ff2222'),
+    onEnd
+}: {
+    to: THREE.Vector3;
+    startedAt: number;
+    duration?: number;
+    color?: THREE.Color;
+    onEnd: () => void;
+}) {
+    const coreRef = useRef<THREE.Mesh>(null!);
+    const glowRef = useRef<THREE.Mesh>(null!);
+    const { camera } = useThree(); // origine du tir = caméra
+
+    useFrame((_, delta) => {
+        const now = performance.now() / 1000;
+        const t = (now - startedAt) / duration; // 0 → 1
+
+        // Fin de vie : on notifie le parent pour retirer ce tir
+        if (t >= 1) {
+            onEnd();
+            return;
+        }
+
+        // Calcul de géométrie : point de départ (caméra) → point d'arrivée (to)
+        const from = new THREE.Vector3().copy(camera.position);
+        const dir = new THREE.Vector3().subVectors(to, from);
+        const len = dir.length();
+        const mid = new THREE.Vector3().addVectors(from, to).multiplyScalar(0.5);
+        dir.normalize();
+
+        // on oriente les cylindres : axe local Y → direction du faisceau
+        const quat = new THREE.Quaternion().setFromUnitVectors(
+            new THREE.Vector3(0, 1, 0),
+            dir
+        );
+
+        // intensité/largeur/alpha en fonction du temps (fade-out)
+        const alpha = 1 - t;                  // opacité décroissante
+        const coreRadius = 0.4 + 0.02 * (1 - t);  // coeur plus fin
+        const glowRadius = 0.5 + 0.07 * (1 - t);  // halo plus large
+
+        // Coeur du faisceau
+        if (coreRef.current) {
+            coreRef.current.position.copy(mid);
+            coreRef.current.quaternion.copy(quat);
+            coreRef.current.scale.set(coreRadius, len / 2, coreRadius); // hauteu  len (le cylindre de base fait 2 en Y)
+            const mat = coreRef.current.material as THREE.MeshBasicMaterial;
+            mat.color = color;
+            mat.opacity = 0.9 * alpha; // très lumineux
+        }
+
+        // Halo externe
+        if (glowRef.current) {
+            glowRef.current.position.copy(mid);
+            glowRef.current.quaternion.copy(quat);
+            glowRef.current.scale.set(glowRadius, len / 2, glowRadius);
+            const mat = glowRef.current.material as THREE.MeshBasicMaterial;
+            mat.color = color;
+            mat.opacity = 0.35 * alpha; // halo moins opaque
+        }
+    });
+
+    return (
+        <group>
+            {/* Coeur du rayon - très lumineux */}
+            <mesh ref={coreRef} renderOrder={999}>
+                <cylinderGeometry args={[1, 1, 2, 16, 1, true]} />
+                <meshBasicMaterial
+                    transparent
+                    blending={THREE.AdditiveBlending}
+                    depthWrite={false}
+                    toneMapped={false} // NE subit pas la correction tonale, donc plus lumineux
+                    color={'#ff2222'}
+                    opacity={0.9}
+                />
+            </mesh>
+
+            {/* Halo externe */}
+            <mesh ref={glowRef} renderOrder={999}>
+                <cylinderGeometry args={[1, 1, 2, 16, 1, true]} />
+                <meshBasicMaterial
+                    transparent
+                    blending={THREE.AdditiveBlending}
+                    depthWrite={false}
+                    color={'#ff4444'}
+                />
+            </mesh>
+        </group>
+    );
 }
 
-function ToolboxOverlay({ onSelectTool, onResetSystem }: ToolboxOverlayProps) {
+//Boite a outil component
+interface ToolboxOverlayProps {
+    onSelectTool: (tool: string | null) => void; // on accepte null = désactivé
+    onResetSystem: () => void;
+    activeTool: string | null; // ✅ on passe l’état courant
+}
+
+function ToolboxOverlay({ onSelectTool, onResetSystem, activeTool }: ToolboxOverlayProps) {
     const [open, setOpen] = useState(false);
+
+    const isLaserActive = activeTool === "laser"; // ✅ détection de l’état
 
     return (
         <div style={{
@@ -61,23 +163,26 @@ function ToolboxOverlay({ onSelectTool, onResetSystem }: ToolboxOverlayProps) {
 
             {open && (
                 <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column' }}>
+
+                    {/* 🔴 Bouton Laser toggle */}
                     <button
-                        onClick={() => onSelectTool('laser')}
+                        onClick={() => onSelectTool(isLaserActive ? null : "laser")}
                         style={{
-                            background: '#0078ff',
+                            background: isLaserActive ? "#cc0000" : "#0078ff", // rouge si actif, bleu si inactif
                             color: 'white',
                             border: 'none',
                             borderRadius: 4,
                             padding: '6px 10px',
                             marginTop: 4,
-                            cursor: 'pointer'
+                            cursor: 'pointer',
+                            fontWeight: 'bold'
                         }}
                     >
-                        🔫 Activer le Laser
+                        {isLaserActive ? "🔴 Laser Activé" : "🔫 Activer le Laser"}
                     </button>
 
                     <button
-                        onClick={onResetSystem} // <-- nouveau bouton
+                        onClick={onResetSystem}
                         style={{
                             background: '#ff6600',
                             color: 'white',
@@ -97,35 +202,54 @@ function ToolboxOverlay({ onSelectTool, onResetSystem }: ToolboxOverlayProps) {
 }
 
 //Composant du soleil
-const NUM_PARTICLES = 500;
+type PlanetHandle = {
+    name: string;
+    ref: THREE.Group | undefined;
+    radius: number;
+};
 
-function RealisticSun({ texture, selectedTool, onExplode, sunExploded }: Props) {
+function RealisticSun({
+    texture,
+    selectedTool,
+    onExplode,
+    sunExploded,
+    // nouvelles props :
+    isLaserArmed,
+    onLaserHit, // (to: THREE.Vector3) => void
+    planetsToCheck = [],
+    onPlanetTouched
+}: Props & { isLaserArmed: boolean; onLaserHit: (to: THREE.Vector3) => void; planetsToCheck?: PlanetHandle[]; onPlanetTouched: (name: string) => void }) {
     const sunRef = useRef<THREE.Mesh>(null!);
     const flareRef = useRef<THREE.Sprite>(null!);
-    const [scale, setScale] = useState(1);
     const [color, setColor] = useState(new THREE.Color('orange'));
 
     const map = useTexture(`/textures/${texture}`);
     const flareTexture = useLoader(TextureLoader, '/textures/solarflare.jpg');
 
+    // <<< NOUVEAU : énergie accumulée par impacts laser
+    const [heat, setHeat] = useState(0); // 0 → pas de chauffe, > seuil → explosion
+
+    // Explosion particules : (on garde ton bloc d'avant si tu l'as déjà)
+    const NUM_PARTICLES = 600;
     const positions = useRef<Float32Array>(new Float32Array(NUM_PARTICLES * 3));
     const velocities = useRef<THREE.Vector3[]>([]);
     const ages = useRef<number[]>([]);
-
     const [geometry, setGeometry] = useState<THREE.BufferGeometry | null>(null);
     const [uniforms, setUniforms] = useState<any>(null);
 
-    // Trigger explosion
+    const SUN_BASE_RADIUS = 41; // DOIT correspondre à sphereGeometry du soleil
+    const touchedPlanets = useRef<Set<string>>(new Set());
+
     const triggerExplosion = () => {
         const vel: THREE.Vector3[] = [];
         const ageArr: number[] = [];
         for (let i = 0; i < NUM_PARTICLES; i++) {
             const dir = new THREE.Vector3(
-                (Math.random() - 0.5),
-                (Math.random() - 0.5),
-                (Math.random() - 0.5)
+                Math.random() - 0.5,
+                Math.random() - 0.5,
+                Math.random() - 0.5
             ).normalize();
-            const speed = 2 + Math.random() * 200;
+            const speed = 2 + Math.random() * 120; // vitesse plus raisonnable
             vel.push(dir.multiplyScalar(speed));
             ageArr.push(0);
 
@@ -140,59 +264,95 @@ function RealisticSun({ texture, selectedTool, onExplode, sunExploded }: Props) 
         geo.setAttribute('position', new THREE.BufferAttribute(positions.current, 3));
         setGeometry(geo);
 
-        // Uniforms pour le shader
         setUniforms({
             time: { value: 0 },
-            lifespan: { value: 5 } // durée de vie particules
+            lifespan: { value: 5 }
         });
     };
 
     useEffect(() => {
-        if (sunExploded) triggerExplosion()
+        if (sunExploded) triggerExplosion();
     }, [sunExploded]);
 
     useFrame((state, delta) => {
-        // Soleil + flare
+        // rotation lente du soleil (si pas explosé)
         if (!sunExploded && sunRef.current) {
             sunRef.current.rotation.y += 0.001;
-            if (selectedTool === 'laser') {
-                const newScale = scale + 0.02;
-                setScale(newScale);
-                sunRef.current.scale.set(newScale, newScale, newScale);
-                const ratio = Math.min((newScale - 1) / 4, 1);
-                setColor(new THREE.Color().lerpColors(new THREE.Color('orange'), new THREE.Color('blue'), ratio));
-                if (newScale >= 5 && onExplode) onExplode();
+
+            // <<< Ici, plus d'auto-chauffe via selectedTool.
+            // On chauffe UNIQUEMENT si l'utilisateur a cliqué le soleil avec le laser (voir onClick ci-dessous).
+
+            // Décroissance de la chaleur (refroidissement lent)
+            if (heat > 0) {
+                setHeat((h) => Math.max(0, h - delta * 0.4)); // cool down
+            }
+
+            // Taille en fonction de la chaleur
+            const baseScale = 1;
+            const scale = baseScale + heat * 0.15; // +15% par unité de chaleur
+            sunRef.current.scale.set(scale, scale, scale);
+
+            // Couleur : orange → blanc selon heat
+            const heatRatio = Math.min(heat / 10, 3); // clamp [0..1]
+            const newColor = new THREE.Color().lerpColors(
+                new THREE.Color('#ffff00'), // orange
+                new THREE.Color('#0000ff'), // bleu
+                heatRatio
+            );
+            setColor(newColor);
+
+            // Collision : UNIQUEMENT tant que le soleil n'est pas explosé et qu'il est en phase de chauffe
+            if (!sunExploded && sunRef.current) {
+                // rayon effectif du soleil = rayon de base * son scale actuel
+                const currentScale = sunRef.current.scale.x; // (x=y=z)
+                const sunRadius = SUN_BASE_RADIUS * currentScale;
+                const sunPos = new THREE.Vector3(0, 0, 0); // ton soleil est au centre
+
+                planetsToCheck.forEach(({ name, ref, radius }) => {
+                    if (!ref || !ref.position) return;
+                    if (touchedPlanets.current.has(name)) return; // déjà détruite
+
+                    const planetPos = ref.position.clone();
+                    const dist = planetPos.distanceTo(sunPos);
+
+                    // contact ?
+                    if (dist <= sunRadius + radius) {
+                        touchedPlanets.current.add(name);
+                        onPlanetTouched(name); // -> SolarSystem => isExploding = true
+                    }
+                });
+            }
+
+            // Seuil d'explosion (ex : 6 clics laser rapides)
+            if (heat > 6 && onExplode) {
+                onExplode();
             }
         }
 
-        if (flareRef.current) {
+        // animation du flare
+        if (!sunExploded && flareRef.current) {
             const time = state.clock.getElapsedTime();
             const flareScale = 6 + Math.sin(time * 3) * 0.8;
             flareRef.current.scale.set(flareScale, flareScale, 1);
         }
 
-        // Explosion anim
+        // particules d'explosion du soleil
         if (sunExploded && geometry && uniforms) {
-            let allGone = true;
             for (let i = 0; i < NUM_PARTICLES; i++) {
                 ages.current[i] += delta;
-                const ageRatio = ages.current[i] / 5; // 5 sec lifespan
-
-                if (ageRatio < 1) {
-                    allGone = false;
+                if (ages.current[i] < 5) {
                     positions.current[i * 3] += velocities.current[i].x * delta;
                     positions.current[i * 3 + 1] += velocities.current[i].y * delta;
                     positions.current[i * 3 + 2] += velocities.current[i].z * delta;
-                    velocities.current[i].multiplyScalar(0.98); // friction
+                    velocities.current[i].multiplyScalar(0.985);
                 }
             }
-
             geometry.attributes.position.needsUpdate = true;
             uniforms.time.value += delta;
         }
     });
 
-    // Shader pour particules rondes et brillantes
+    // Shader rond/blanc → transparent (comme on t’avait mis). Tu peux garder ton ShaderMaterial si tu l’as.
     const particleShader = uniforms
         ? new THREE.ShaderMaterial({
             uniforms,
@@ -200,17 +360,13 @@ function RealisticSun({ texture, selectedTool, onExplode, sunExploded }: Props) 
             blending: THREE.AdditiveBlending,
             depthWrite: false,
             vertexShader: `
-          attribute float size;
-          varying float vAge;
           void main() {
-            vAge = 0.0;
             vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-            gl_PointSize = 10.0 * (300.0 / -mvPosition.z);
+            gl_PointSize = 6.0 * (300.0 / -mvPosition.z);
             gl_Position = projectionMatrix * mvPosition;
           }
         `,
             fragmentShader: `
-          varying float vAge;
           uniform float time;
           uniform float lifespan;
           void main() {
@@ -227,12 +383,27 @@ function RealisticSun({ texture, selectedTool, onExplode, sunExploded }: Props) 
 
     return (
         <group>
+            {/* Soleil (clic = chauffe SI laser armé) */}
             {!sunExploded && (
-                <mesh ref={sunRef}>
-                    <sphereGeometry args={[22, 64, 64]} />
-                    <meshStandardMaterial map={map} emissive={color} emissiveIntensity={2} />
+                <mesh
+                    ref={sunRef}
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        if (!isLaserArmed) return; // on ignore si le laser n'est pas armé
+
+                        // 1) On "chauffe" le soleil par un clic
+                        setHeat((h) => Math.min(10, h + 1.2)); // ajout de chaleur
+                        // 2) On dessine un tir laser depuis la caméra jusqu'au centre du soleil
+                        const worldPos = new THREE.Vector3();
+                        e.object.getWorldPosition(worldPos);
+                        onLaserHit(worldPos);
+                    }}
+                >
+                    <sphereGeometry args={[SUN_BASE_RADIUS, 64, 64]} />
+                    <meshStandardMaterial map={map} color={color} emissive={color} emissiveIntensity={0} />
                 </mesh>
             )}
+
             {!sunExploded && (
                 <sprite ref={flareRef}>
                     <spriteMaterial
@@ -251,7 +422,6 @@ function RealisticSun({ texture, selectedTool, onExplode, sunExploded }: Props) 
         </group>
     );
 }
-
 const planetDescriptions: Record<string, string> = {
     mercury: "Mercure est la planète la plus proche du Soleil.",
     venus: "Vénus a une atmosphère très dense et chaude.",
@@ -276,6 +446,61 @@ export default function SolarSystem() {
     const [alignPlanets, setAlignPlanets] = useState(false); //un state pour dire que par defaut les planette ne sont pas alligner elle bouge normalement
     const [selectedTool, setSelectedTool] = useState<string | null>(null); //Boite a outil
     const [sunExploded, setSunExploded] = useState(false);
+    const [laserTarget, setLaserTarget] = useState<string | null>(null);
+    const [shots, setShots] = useState<{ id: number; to: THREE.Vector3; startedAt: number; duration: number }[]>([]);//Liste des tirs laser à afficher
+
+    // Références des planètes (remplies par onRegister)
+    const planetRefs = useRef<Record<string, THREE.Group>>({});
+
+    // Rayons des planètes (pour collision)
+    const planetRadii = useRef<Record<string, number>>({});
+
+    // Planètes en explosion
+    const [explodingPlanets, setExplodingPlanets] = useState<Record<string, boolean>>({});
+
+    // utilitaire pour marquer une planète en explosion
+    const triggerPlanetExplosion = (name: string) => {
+        setExplodingPlanets((prev) => {
+            if (prev[name]) return prev; // déjà en explosion
+            return { ...prev, [name]: true };
+        });
+    };
+
+    //Fonction d'enregistrement 
+    const handleRegisterPlanet = (name: string, ref: THREE.Group, radius: number) => {
+        planetRefs.current[name] = ref;
+        planetRadii.current[name] = radius;
+    };
+
+    // Construire la liste des planètes à surveiller par le Soleil
+    const planetsToCheck = [
+        // Ajoute ici celles construites avec OrbitingPlanet:
+        { name: 'mercury', ref: planetRefs.current['mercury'], radius: planetRadii.current['mercury'] ?? 0 },
+        { name: 'venus', ref: planetRefs.current['venus'], radius: planetRadii.current['venus'] ?? 0 },
+        { name: 'earth', ref: planetRefs.current['earth'], radius: planetRadii.current['earth'] ?? 0 },
+        { name: 'mars', ref: planetRefs.current['mars'], radius: planetRadii.current['mars'] ?? 0 },
+        { name: 'jupiter', ref: planetRefs.current['jupiter'], radius: planetRadii.current['jupiter'] ?? 0 },
+        { name: 'neptune', ref: planetRefs.current['neptune'], radius: planetRadii.current['neptune'] ?? 0 },
+        // NOTE : Pour Saturn/Uranus (composants spéciaux), on le fera après si tu veux, en ajoutant onRegister aussi
+    ].filter(p => !!p.ref); // on filtre celles déjà enregistrées
+
+
+    //Ajouter un tir
+    const fireLaser = (to: THREE.Vector3, duration = 0.6) => {
+        setShots((prev) => [
+            ...prev,
+            {
+                id: Math.random(),
+                to: to.clone(),
+                startedAt: performance.now() / 1000, duration
+            }
+        ]);
+    };
+
+    //Retirer un tir (quand utilisateur a fini)
+    const removeShot = (id: number) => {
+        setShots((prev) => prev.filter((s) => s.id !== id));
+    };
 
     //On teste si la planette est selectionne pour faire un focus simple
     if (selectedPlanet) {
@@ -293,7 +518,13 @@ export default function SolarSystem() {
             <>
                 {/* Boîte à outils flottante */}
                 <ToolboxOverlay
-                    onSelectTool={(tool) => setSelectedTool(tool)}
+                    activeTool={selectedTool} // on transmet l'état courant 
+                    onSelectTool={(tool) => {
+                        setSelectedTool(tool);
+                        if (tool === 'laser') {
+                            setLaserTarget(null); //On remet à zéro la cible
+                        }
+                    }}
                     onResetSystem={() => {
                         // réinitialisation complète
                         setSunExploded(false);
@@ -304,6 +535,11 @@ export default function SolarSystem() {
                         setOrbitSpeedFactor(1);
                         setSystemKey(prev => prev + 1); // force reconstruction du Canvas
                         setSelectedTool(null);
+                        setLaserTarget(null); //Rset le larserTarget aussi
+                        setShots([]); //On retire tous les tirs en cours
+                        setExplodingPlanets({}); //Tout redevient intact
+                        planetRefs.current = {};
+                        planetRadii.current = {};
                     }}
                 />
             </>
@@ -397,6 +633,10 @@ export default function SolarSystem() {
                         selectedTool={selectedTool}
                         sunExploded={sunExploded}
                         onExplode={() => setSunExploded(true)}
+                        isLaserArmed={selectedTool === 'laser'}
+                        onLaserHit={(to) => fireLaser(to)} //Dessine le rayon vers le soleil
+                        planetsToCheck={planetsToCheck}
+                        onPlanetTouched={(name) => triggerPlanetExplosion(name)}
                     />
 
                     {/* planetee en orbite */}
@@ -413,23 +653,25 @@ export default function SolarSystem() {
                                 setSelectedPlanetName("mercury");
                             }}
                             speedFactor={0}
-                            targetPosition={alignPlanets ? new THREE.Vector3(25, 0, 0) : null} //Positionnement des planettes 
+                            targetPosition={alignPlanets ? new THREE.Vector3(44, 0, 0) : null} //Positionnement des planettes 
                         />
                     ) : (
                         <>
-                            <OrbitCircle radius={23.51} color="white" />
+                            <OrbitCircle radius={45.51} color="white" />
                             <OrbitingPlanet
+                                name="mercury"
                                 texture="mercury.jpg"
                                 radius={0.9}
-                                orbitRadius={23.51}
+                                orbitRadius={45.51}
                                 orbitSpeed={2.5}
+                                onRegister={handleRegisterPlanet}
                                 onClick={(ref) => {
                                     setFollowedPlanet(ref);
                                     setSelectedPlanetName("mercury");
                                 }}
                                 sunPosition={new THREE.Vector3(0, 0, 0)} // ou position réelle du Soleil
-                                sunExploded={sunExploded}
                                 speedFactor={orbitSpeedFactor}
+                                isExploding={!!explodingPlanets['mercury']}
 
                             />
                         </>
@@ -449,16 +691,16 @@ export default function SolarSystem() {
                                 setSelectedPlanetName("venus");
                             }}
                             speedFactor={0}
-                            targetPosition={alignPlanets ? new THREE.Vector3(32, 0, 0) : null} //Positionnement des planettes 
+                            targetPosition={alignPlanets ? new THREE.Vector3(55, 0, 0) : null} //Positionnement des planettes 
                         />
 
                     ) : (
                         <>
-                            <OrbitCircle radius={30} color="lightyellow" />
+                            <OrbitCircle radius={55.60} color="lightyellow" />
                             <OrbitingPlanet
                                 texture="venus_surface.jpg"
                                 radius={1.9}
-                                orbitRadius={30.60}
+                                orbitRadius={55.60}
                                 orbitSpeed={0.97}
                                 onClick={(ref) => {
                                     setFollowedPlanet(ref);           // on stocke le ref pour que la caméra suive
@@ -474,7 +716,7 @@ export default function SolarSystem() {
                     {alignPlanets ? (
                         <OrbitingPlanet
                             texture="earth_daymap.jpg"
-                            radius={2}
+                            radius={2.5}
                             orbitRadius={36.05}
                             orbitSpeed={0}
                             //position={[-50, 0, 0]}
@@ -483,7 +725,7 @@ export default function SolarSystem() {
                                 setSelectedPlanetName("earth")
                             }}
                             speedFactor={0}
-                            targetPosition={alignPlanets ? new THREE.Vector3(40, 0, 0) : null} //Positionnement des planettes 
+                            targetPosition={alignPlanets ? new THREE.Vector3(65, 0, 0) : null} //Positionnement des planettes 
                         >
                             {/* Lueur nocturnes */}
                             <group>
@@ -499,7 +741,7 @@ export default function SolarSystem() {
                                     />
                                 </mesh>
                                 <mesh>
-                                    <sphereGeometry args={[2 + 0.01, 64, 64]} />
+                                    <sphereGeometry args={[2.5 + 0.01, 64, 64]} />
                                     <meshStandardMaterial
                                         map={cloudMap}
                                         transparent
@@ -521,11 +763,11 @@ export default function SolarSystem() {
 
                         <>
                             {/* Orbites visibles */}
-                            <OrbitCircle radius={36.05} color="lightblue" />
+                            <OrbitCircle radius={68.05} color="lightblue" />
                             <OrbitingPlanet
                                 texture="earth_daymap.jpg"
                                 radius={2}
-                                orbitRadius={36.05}
+                                orbitRadius={68.05}
                                 orbitSpeed={0.60}
                                 onClick={(ref) => {
                                     setFollowedPlanet(ref);           // on stocke le ref pour que la caméra suive
@@ -581,15 +823,15 @@ export default function SolarSystem() {
                                 setSelectedPlanetName("mars");
                             }}
                             speedFactor={0}
-                            targetPosition={alignPlanets ? new THREE.Vector3(50, 0, 0) : null} //Positionnement des planettes 
+                            targetPosition={alignPlanets ? new THREE.Vector3(75, 0, 0) : null} //Positionnement des planettes 
                         />
                     ) : (
                         <>
-                            <OrbitCircle radius={44.40} color="lightorange" />
+                            <OrbitCircle radius={78.40} color="lightorange" />
                             <OrbitingPlanet
                                 texture="mars.jpg"
                                 radius={1.6}
-                                orbitRadius={44.40}
+                                orbitRadius={78.40}
                                 orbitSpeed={0.32}
                                 onClick={(ref) => {
                                     setFollowedPlanet(ref);           // on stocke le ref pour que la caméra suive
@@ -616,22 +858,26 @@ export default function SolarSystem() {
                                 setSelectedPlanetName("jupiter")
                             }}
                             speedFactor={0}
-                            targetPosition={alignPlanets ? new THREE.Vector3(80, 0, 0) : null} //Positionnement des planettes 
+                            targetPosition={alignPlanets ? new THREE.Vector3(102, 0, 0) : null} //Positionnement des planettes 
                         />
                     ) : (
                         <>
-                            <OrbitCircle radius={70.65} color="lightgreen" />
+                            <OrbitCircle radius={100.65} color="lightgreen" />
                             <OrbitingPlanet
                                 texture="jupiter.jpg"
-                                radius={8.94}
-                                orbitRadius={70.65}
+                                radius={10.94}
+                                orbitRadius={100.65}
                                 orbitSpeed={0.051}
                                 onClick={(ref) => {
                                     setFollowedPlanet(ref);           // on stocke le ref pour que la caméra suive
                                     setSelectedPlanetName("jupiter");   // on stocke le nom pour afficher la description
+                                    if (selectedTool === 'laser') {
+                                        setLaserTarget('jupiter');
+                                        setTimeout(() => setLaserTarget(null), 4000); //(optionnel) reset automatique
+                                    }
                                 }}
                                 speedFactor={orbitSpeedFactor}
-
+                                isExploding={selectedTool === "laser" && laserTarget === "jupiter"}
                             />
                         </>
                     )}
@@ -650,16 +896,16 @@ export default function SolarSystem() {
                                 setSelectedPlanetName("saturn");
                             }}
                             speedFactor={0}
-                            targetPosition={alignPlanets ? new THREE.Vector3(110, 0, 0) : null} //Positionnement des planettes 
+                            targetPosition={alignPlanets ? new THREE.Vector3(135, 0, 0) : null} //Positionnement des planettes 
                         />
                     ) : (
                         <>
-                            <OrbitCircle radius={100.45} color="wheat" />
+                            <OrbitCircle radius={140.45} color="wheat" />
                             <SaturnWithRings
                                 texture="saturn.jpg"
                                 ringTexture="saturn_ring_alpha.png"
-                                radius={6.28}
-                                orbitRadius={100.45}
+                                radius={7.8}
+                                orbitRadius={140.45}
                                 orbitSpeed={0.025}
                                 onClick={(ref) => {
                                     setFollowedPlanet(ref);           // on stocke le ref pour que la caméra suive
@@ -684,16 +930,16 @@ export default function SolarSystem() {
                                 setSelectedPlanet("uranus");
                             }}
                             speedFactor={0}
-                            targetPosition={alignPlanets ? new THREE.Vector3(135, 0, 0) : null} //Positionnement des planettes 
+                            targetPosition={alignPlanets ? new THREE.Vector3(160, 0, 0) : null} //Positionnement des planettes 
                         />
                     ) : (
                         <>
-                            <OrbitCircle radius={120} color="lightpink" />
+                            <OrbitCircle radius={175} color="lightpink" />
                             <UranusWithRings
                                 texture="uranus.jpg"
                                 ringTexture="saturn_ring_alpha.png"
-                                radius={3}
-                                orbitRadius={120}
+                                radius={3.8}
+                                orbitRadius={175}
                                 orbitSpeed={0.08}
                                 onClick={(ref) => {
                                     setFollowedPlanet(ref);           // on stocke le ref pour que la caméra suive
@@ -717,15 +963,15 @@ export default function SolarSystem() {
                                 setSelectedPlanetName("neptune");
                             }}
                             speedFactor={0}
-                            targetPosition={alignPlanets ? new THREE.Vector3(155, 0, 0) : null} //Positionnement des planettes 
+                            targetPosition={alignPlanets ? new THREE.Vector3(175, 0, 0) : null} //Positionnement des planettes 
                         />
                     ) : (
                         <>
-                            <OrbitCircle radius={130.35} color="lightblue" />
+                            <OrbitCircle radius={200.35} color="lightblue" />
                             <OrbitingPlanet
                                 texture="neptune.jpg"
-                                radius={6.74}
-                                orbitRadius={130.35}
+                                radius={8.74}
+                                orbitRadius={200.35}
                                 orbitSpeed={0.015}
                                 onClick={(ref) => {
                                     setFollowedPlanet(ref);           // on stocke le ref pour que la caméra suive
@@ -736,7 +982,16 @@ export default function SolarSystem() {
                         </>
                     )}
 
-
+                    {/* Rendu des tirs laser */}
+                    {shots.map((s) => (
+                        <LaserBeam
+                            key={s.id}
+                            to={s.to}
+                            startedAt={s.startedAt}
+                            duration={s.duration}
+                            onEnd={() => removeShot(s.id)}
+                        />
+                    ))}
 
                     {/* Planètes */}
                     {/*
