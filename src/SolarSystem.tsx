@@ -26,6 +26,77 @@ type Props = {
     onSelectTool: string;
 };
 
+//Menu lateral pour afficher les planettes
+function PlanetMenu({ planets, onSelectPlanet }: { planets: string[], onSelectPlanet: (planet: string) => void }) {
+    const [open, setOpen] = useState(false);
+
+    return (
+        <div style={{
+            position: "absolute",
+            top: 200,
+            left: 20,
+            zIndex: 20,
+        }}>
+            {/* Bouton icône planète */}
+            <button
+                onClick={() => setOpen(!open)}
+                style={{
+                    fontSize: "22px",
+                    background: "#333",
+                    color: "white",
+                    border: "none",
+                    borderRadius: "50%",
+                    padding: "12px",
+                    cursor: "pointer",
+                    boxShadow: "0 4px 10px rgba(0,0,0,0.4)"
+                }}
+            >
+                🪐
+            </button>
+
+            {/* Panneau latéral */}
+            {open && (
+                <div style={{
+                    marginTop: 10,
+                    padding: 12,
+                    background: "#111",
+                    borderRadius: 8,
+                    color: "white",
+                    width: 160,
+                    maxHeight: 400,
+                    overflowY: "auto",
+                    boxShadow: "0 4px 12px rgba(0,0,0,0.5)"
+                }}>
+                    <h4 style={{ margin: "0 0 8px 0" }}>Planètes</h4>
+                    {planets.length === 0 ? (
+                        <p style={{ fontSize: 12, opacity: 0.6 }}>Aucune planète</p>
+                    ) : (
+                        planets.map((p) => (
+                            <button
+                                key={p}
+                                onClick={() => onSelectPlanet(p)}
+                                style={{
+                                    display: "block",
+                                    width: "100%",
+                                    background: "#222",
+                                    color: "white",
+                                    border: "none",
+                                    borderRadius: 4,
+                                    padding: "6px",
+                                    marginBottom: 6,
+                                    cursor: "pointer",
+                                    textAlign: "left"
+                                }}
+                            >
+                                {p}
+                            </button>
+                        ))
+                    )}
+                </div>
+            )}
+        </div>
+    );
+}
 
 // Un faisceau laser qui part de la caméra et va jusqu'au point "to".
 // Il vit "duration" secondes et s'éteint en douceur.
@@ -240,6 +311,9 @@ function RealisticSun({
     const SUN_BASE_RADIUS = 41; // DOIT correspondre à sphereGeometry du soleil
     const touchedPlanets = useRef<Set<string>>(new Set());
 
+    //Verifions si la souris est enfoncée sur le soleil
+    const isFiring = useRef(false);
+
     const triggerExplosion = () => {
         const vel: THREE.Vector3[] = [];
         const ageArr: number[] = [];
@@ -282,18 +356,23 @@ function RealisticSun({
             // <<< Ici, plus d'auto-chauffe via selectedTool.
             // On chauffe UNIQUEMENT si l'utilisateur a cliqué le soleil avec le laser (voir onClick ci-dessous).
 
+            // Chauffe continue si le laser est maintenu
+            if (isFiring.current && !sunExploded) {
+                setHeat((h) => Math.min(30, h + delta * 3)); // chauffe 3 unités par seconde
+            }
+
             // Décroissance de la chaleur (refroidissement lent)
             if (heat > 0) {
-                setHeat((h) => Math.max(0, h - delta * 0.4)); // cool down
+                setHeat((h) => Math.max(0, h - delta * 1)); // cool down
             }
 
             // Taille en fonction de la chaleur
             const baseScale = 1;
-            const scale = baseScale + heat * 0.15; // +15% par unité de chaleur
+            const scale = baseScale + heat * 0.04; // +15% par unité de chaleur
             sunRef.current.scale.set(scale, scale, scale);
 
             // Couleur : orange → blanc selon heat
-            const heatRatio = Math.min(heat / 10, 3); // clamp [0..1]
+            const heatRatio = Math.min(heat / 10, 2); // clamp [0..1]
             const newColor = new THREE.Color().lerpColors(
                 new THREE.Color('#ffff00'), // orange
                 new THREE.Color('#0000ff'), // bleu
@@ -324,7 +403,7 @@ function RealisticSun({
             }
 
             // Seuil d'explosion (ex : 6 clics laser rapides)
-            if (heat > 6 && onExplode) {
+            if (heat > 20 && onExplode) {
                 onExplode();
             }
         }
@@ -387,16 +466,21 @@ function RealisticSun({
             {!sunExploded && (
                 <mesh
                     ref={sunRef}
-                    onClick={(e) => {
+                    onPointerDown={(e) => {
                         e.stopPropagation();
-                        if (!isLaserArmed) return; // on ignore si le laser n'est pas armé
+                        if (!isLaserArmed) return;
+                        isFiring.current = true;
 
-                        // 1) On "chauffe" le soleil par un clic
-                        setHeat((h) => Math.min(10, h + 1.2)); // ajout de chaleur
-                        // 2) On dessine un tir laser depuis la caméra jusqu'au centre du soleil
+                        // chauffe instantanée (clic simple)
+                        setHeat((h) => Math.min(30, h + 1.2));
+
                         const worldPos = new THREE.Vector3();
                         e.object.getWorldPosition(worldPos);
                         onLaserHit(worldPos);
+                    }}
+                    onPointerUp={(e) => {
+                        e.stopPropagation();
+                        isFiring.current = false;
                     }}
                 >
                     <sphereGeometry args={[SUN_BASE_RADIUS, 64, 64]} />
@@ -422,6 +506,7 @@ function RealisticSun({
         </group>
     );
 }
+
 const planetDescriptions: Record<string, string> = {
     mercury: "Mercure est la planète la plus proche du Soleil.",
     venus: "Vénus a une atmosphère très dense et chaude.",
@@ -458,12 +543,15 @@ export default function SolarSystem() {
     // Planètes en explosion
     const [explodingPlanets, setExplodingPlanets] = useState<Record<string, boolean>>({});
 
+    const INITIAL_PLANETS = [ "mercury", "venus", "earth", "mars", "jupiter", "saturn", "uranus", "neptune"]
+
     // utilitaire pour marquer une planète en explosion
+    const [availablePlanets, setAvailablePlanets] = useState<string[]>(INITIAL_PLANETS);
+
+    // Lorsqu'une planète explose
     const triggerPlanetExplosion = (name: string) => {
-        setExplodingPlanets((prev) => {
-            if (prev[name]) return prev; // déjà en explosion
-            return { ...prev, [name]: true };
-        });
+        setExplodingPlanets((prev) => ({ ...prev, [name]: true }));
+        setAvailablePlanets((prev) => prev.filter((p) => p !== name)); // ❌ supprimer de la liste
     };
 
     //Fonction d'enregistrement 
@@ -540,6 +628,7 @@ export default function SolarSystem() {
                         setExplodingPlanets({}); //Tout redevient intact
                         planetRefs.current = {};
                         planetRadii.current = {};
+                        setAvailablePlanets(INITIAL_PLANETS);
                     }}
                 />
             </>
@@ -601,6 +690,18 @@ export default function SolarSystem() {
             <div>
                 <HamburgerMenu onSelectPlanet={setSelectedPlanet} />
             </div>
+            
+            {/* Boutton pour lister les planettes */}
+            <PlanetMenu
+                planets={availablePlanets}
+                onSelectPlanet={(planetName) => {
+                    const ref = planetRefs.current[planetName];
+                    if (ref) {
+                        setFollowedPlanet(ref);      // la caméra suit la planète
+                        setSelectedPlanetName(planetName);
+                    }
+                }}
+            />
 
             <Canvas
                 key={systemKey} //Clé pour reccreer Canvas et reintailiser tout
@@ -663,7 +764,7 @@ export default function SolarSystem() {
                                 texture="mercury.jpg"
                                 radius={0.9}
                                 orbitRadius={45.51}
-                                orbitSpeed={2.5}
+                                orbitSpeed={  2.5}
                                 onRegister={handleRegisterPlanet}
                                 onClick={(ref) => {
                                     setFollowedPlanet(ref);
@@ -698,15 +799,18 @@ export default function SolarSystem() {
                         <>
                             <OrbitCircle radius={55.60} color="lightyellow" />
                             <OrbitingPlanet
+                                name="venus"
                                 texture="venus_surface.jpg"
                                 radius={1.9}
                                 orbitRadius={55.60}
                                 orbitSpeed={0.97}
+                                onRegister={handleRegisterPlanet}
                                 onClick={(ref) => {
                                     setFollowedPlanet(ref);           // on stocke le ref pour que la caméra suive
                                     setSelectedPlanetName("venus");   // on stocke le nom pour afficher la description
                                 }}
                                 speedFactor={orbitSpeedFactor}
+                                isExploding={!!explodingPlanets['venus']}
                             />
                         </>
                     )}
@@ -765,15 +869,22 @@ export default function SolarSystem() {
                             {/* Orbites visibles */}
                             <OrbitCircle radius={68.05} color="lightblue" />
                             <OrbitingPlanet
+                                name="earth"
                                 texture="earth_daymap.jpg"
                                 radius={2}
                                 orbitRadius={68.05}
                                 orbitSpeed={0.60}
+                                onRegister={handleRegisterPlanet}
                                 onClick={(ref) => {
                                     setFollowedPlanet(ref);           // on stocke le ref pour que la caméra suive
                                     setSelectedPlanetName("earth");   // on stocke le nom pour afficher la description
+                                    if (selectedTool === 'laser') {
+                                        setLaserTarget('earth');
+                                        setTimeout(() => setLaserTarget(null), 4000);
+                                    }
                                 }}
                                 speedFactor={orbitSpeedFactor}
+                                isExploding={!!explodingPlanets['earth'] || (selectedTool === "laser" && laserTarget === "earth")}
                             >
                                 {/* Lueurs nocturnes */}
                                 <group>
@@ -829,15 +940,22 @@ export default function SolarSystem() {
                         <>
                             <OrbitCircle radius={78.40} color="lightorange" />
                             <OrbitingPlanet
+                                name="mars"
                                 texture="mars.jpg"
                                 radius={1.6}
                                 orbitRadius={78.40}
                                 orbitSpeed={0.32}
+                                onRegister={handleRegisterPlanet}
                                 onClick={(ref) => {
                                     setFollowedPlanet(ref);           // on stocke le ref pour que la caméra suive
                                     setSelectedPlanetName("mars");   // on stocke le nom pour afficher la description
+                                    if (selectedTool === 'laser') {
+                                        setLaserTarget('mars');
+                                        setTimeout(() => setLaserTarget(null), 4000);
+                                    }
                                 }}
                                 speedFactor={orbitSpeedFactor}
+                                isExploding={(selectedTool === "laser" && laserTarget === "mars") || !!explodingPlanets["mars"]}
                             />
                         </>
                     )}
